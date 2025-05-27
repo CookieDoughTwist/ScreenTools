@@ -1,8 +1,6 @@
 import cv2
 import pytesseract
-from pytesseract import Output
 import pandas as pd
-from collections import defaultdict
 import os
 
 def rotate_image(image, angle):
@@ -19,87 +17,61 @@ def rotate_image(image, angle):
         M = cv2.getRotationMatrix2D(center, angle, 1.0)
         return cv2.warpAffine(image, M, (w, h))
 
-# Path to the input video
+# Path to tesseract executable (set this if not in PATH)
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+# === CONFIG ===
 video_path = 'test.mp4'
-
-# Output CSV file
 output_csv = 'output.csv'
+frame_skip = 10  # Process every 10th frame to reduce redundancy
 
-# Initialize video capture
+# === STEP 1: Read Video and Extract Frames ===
 cap = cv2.VideoCapture(video_path)
-
-# Initialize a list to store extracted data
-extracted_data = []
-
+frames = []
 frame_count = 0
 
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
         break
-
-    # Process every nth frame to reduce redundancy (adjust as needed)
-    if frame_count % 10 == 0:
-        rotated = rotate_image(frame, 270)  # or 180 / 270
-        
-        # Convert to grayscale
-        gray = cv2.cvtColor(rotated, cv2.COLOR_BGR2GRAY)
-
-        # Perform OCR with layout information
-        ocr_data = pytesseract.image_to_data(gray, output_type=Output.DICT)
-
-        # Collect words with their positions
-        words = []
-        for i in range(len(ocr_data["text"])):
-            text = ocr_data["text"][i].strip()
-            try:
-                conf = float(ocr_data["conf"][i])
-            except ValueError:
-                continue
-            if text and conf > 60:
-                x, y, w, h = (ocr_data["left"][i], ocr_data["top"][i],
-                              ocr_data["width"][i], ocr_data["height"][i])
-                words.append({
-                    "text": text,
-                    "conf": conf,
-                    "left": x,
-                    "top": y,
-                    "right": x + w,
-                    "bottom": y + h
-                })
-
-        # Group words by approximate vertical position (rows)
-        row_buckets = defaultdict(list)
-        row_tolerance = 10  # pixels
-
-        for word in words:
-            row_key = word['top'] // row_tolerance
-            row_buckets[row_key].append(word)
-
-        # Sort rows by vertical position
-        sorted_rows = sorted(row_buckets.items(), key=lambda item: min(w['top'] for w in item[1]))
-
-        # Extract leftmost string as name, rightmost number as score
-        for _, row_words in sorted_rows:
-            if len(row_words) < 2:
-                continue
-            # Sort row left-to-right
-            sorted_row = sorted(row_words, key=lambda w: w['left'])
-            name = sorted_row[0]['text']
-            numbers = [w['text'] for w in sorted_row if w['text'].replace(',', '').replace('.', '').isdigit()]
-            score = numbers[-1] if numbers else ''
-            if name and score:
-                extracted_data.append((name, score))
-    break
+    if frame_count % frame_skip == 0:
+        frames.append(frame)
     frame_count += 1
 
 cap.release()
 
-# Remove duplicates
-unique_data = list(set(extracted_data))
+# === STEP 2: OCR on Frames ===
+all_rows = []
+
+for idx, frame in enumerate(frames):
+    rotated = rotate_image(frame, 270)  # or 180 / 270
+    
+    # Convert to grayscale
+    gray = cv2.cvtColor(rotated, cv2.COLOR_BGR2GRAY)
+    
+    # Optional: Improve contrast or thresholding
+    # gray = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, 
+    #                               cv2.THRESH_BINARY, 11, 2)
+    cv2.imwrite(f"frame_{idx}.png", gray)
+    # OCR
+    text = pytesseract.image_to_string(gray, config='--psm 6')  # PSM 6 = assume uniform block of text
+    
+    # Parse lines
+    for line in text.split('\n'):
+        if line.strip():  # Non-empty
+            # Split by whitespace or tab (adjust as needed)
+            row = [col.strip() for col in line.split()]
+            all_rows.append(row)
+
+# === STEP 3: Normalize and Save to CSV ===
+# Find max number of columns
+max_cols = max(len(row) for row in all_rows)
+
+# Pad rows to same length
+normalized_rows = [row + ['']*(max_cols - len(row)) for row in all_rows]
 
 # Save to CSV
-df = pd.DataFrame(unique_data, columns=['Name', 'Total Score'])
-df.to_csv(output_csv, index=False)
+df = pd.DataFrame(normalized_rows)
+df.to_csv(output_csv, index=False, header=False)
 
-print(f"Extraction complete. Data saved to {output_csv}.")
+print(f"Saved extracted table to: {output_csv}")
